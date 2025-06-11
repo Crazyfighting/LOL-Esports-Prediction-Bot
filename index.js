@@ -1,8 +1,10 @@
-const { Client, GatewayIntentBits, Collection, EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Collection, EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder, AttachmentBuilder } = require('discord.js');
+const { createCanvas, loadImage } = require('canvas');
 const { token } = require('./config.json');
 const Database = require('./database.js');
 const MatchScraper = require('./scraper.js');
 const cron = require('node-cron');
+const path = require('path');
 
 class LOLPredictionBot {
     constructor() {
@@ -10,7 +12,9 @@ class LOLPredictionBot {
             intents: [
                 GatewayIntentBits.Guilds,
                 GatewayIntentBits.GuildMessages,
-                GatewayIntentBits.MessageContent
+                GatewayIntentBits.MessageContent,
+                GatewayIntentBits.GuildMembers,
+                GatewayIntentBits.GuildPresences
             ]
         });
         
@@ -119,10 +123,20 @@ class LOLPredictionBot {
     async handleModalSubmit(interaction) {
         if (!interaction.customId.startsWith('prediction_')) return;
 
-        const matchId = interaction.customId.split('_')[1];
+        // 移除 'prediction_' 前綴，保留完整的比賽 ID
+        const matchId = interaction.customId.replace('prediction_', '');
+        console.log('Modal 提交，完整 customId:', interaction.customId);
+        console.log('解析後的比賽ID:', matchId);
+        console.log('當前活躍比賽:', Array.from(this.activeMatches.keys()));
+        
         const match = this.activeMatches.get(matchId);
+        console.log('找到的比賽資料:', match);
         
         if (!match) {
+            console.log('找不到比賽資料，可能原因：');
+            console.log('1. 比賽已過期');
+            console.log('2. 比賽ID不匹配');
+            console.log('3. activeMatches 未正確更新');
             return interaction.reply({ 
                 content: '此比賽已不可預測！', 
                 ephemeral: true 
@@ -130,7 +144,10 @@ class LOLPredictionBot {
         }
 
         const prediction = interaction.fields.getTextInputValue('prediction');
+        console.log('用戶預測:', prediction);
+        
         const validation = this.scraper.validatePrediction(prediction, match.format);
+        console.log('預測驗證結果:', validation);
         
         if (!validation.valid) {
             return interaction.reply({ 
@@ -166,6 +183,7 @@ class LOLPredictionBot {
             ephemeral: true 
         });
     }
+
     async showUpcomingMatches(interaction) {
         await interaction.deferReply();
         
@@ -176,21 +194,31 @@ class LOLPredictionBot {
                 return interaction.followUp('目前沒有即將舉行的比賽！');
             }
 
+            // 清空之前的活躍比賽
+            this.activeMatches.clear();
+            console.log('已清空活躍比賽列表');
+
             for (const match of matches) {
-                const embed = this.createMatchEmbed(match);
+                console.log('處理比賽:', match);
+                const { embed, files } = await this.createMatchEmbed(match);
                 const button = this.createPredictButton(match.id);
                 
                 await interaction.followUp({
                     embeds: [embed],
-                    components: [button]
+                    components: [button],
+                    files: files
                 });
                 
+                // 確保比賽資料被正確加入
                 this.activeMatches.set(match.id, {
                     ...match,
                     guildId: interaction.guild.id,
                     channelId: interaction.channel.id
                 });
+                console.log('已加入活躍比賽:', match.id);
             }
+
+            console.log('當前活躍比賽列表:', Array.from(this.activeMatches.keys()));
         } catch (error) {
             console.error('獲取比賽資料錯誤:', error);
             interaction.followUp('獲取比賽資料時發生錯誤！');
@@ -246,22 +274,77 @@ class LOLPredictionBot {
         await interaction.reply({ embeds: [embed] });
     }
 
-    createMatchEmbed(match) {
+    async createMatchEmbed(match) {
+        const matchDate = new Date(match.time);
+        const formattedDate = matchDate.toISOString().split('T')[0]; // Gets YYYY-MM-DD
+        const formattedTime = matchDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' });
+
         const embed = new EmbedBuilder()
             .setColor(0x0099FF)
-            .setTitle(`${match.team1} vs ${match.team2}`)
             .addFields(
-                { name: '比賽時間', value: match.time, inline: true },
+                { name: '日期', value: formattedDate, inline: true },
+                { name: '時間 (UTC)', value: formattedTime, inline: true },
                 { name: '賽制', value: match.format, inline: true },
-                { name: '系列賽', value: match.tournament, inline: true }
+                { name: '聯賽/系列賽', value: match.tournament, inline: false }
             )
             .setTimestamp()
             .setFooter({ text: 'LOL Esports Prediction Bot' });
 
-        return embed;
+        const files = [];
+
+        // 獲取並快取隊伍 Logo
+        const team1LogoPath = await this.scraper.getOrCacheTeamLogo(match.team1);
+        const team2LogoPath = await this.scraper.getOrCacheTeamLogo(match.team2);
+
+        if (team1LogoPath && team2LogoPath) {
+            const canvasWidth = 800; // 畫布寬度
+            const canvasHeight = 150; // 畫布高度
+            const logoSize = 100; // Logo 圖片大小
+            const vsTextSize = 80; // 'vs' 文字大小，進一步調大
+            const padding = 100; // 大幅增加隊伍 Logo 與 "vs" 文字之間的間距
+
+            const canvas = createCanvas(canvasWidth, canvasHeight);
+            const context = canvas.getContext('2d');
+
+            // 恢復背景填充
+            context.fillStyle = '#1e2124'; 
+            context.fillRect(0, 0, canvasWidth, canvasHeight);
+
+            // 載入並繪製隊伍 1 Logo
+            const team1Logo = await loadImage(team1LogoPath);
+            const team1X = (canvasWidth / 2) - logoSize - (vsTextSize / 2) - padding; // 調整位置
+            const team1Y = (canvasHeight - logoSize) / 2;
+            context.drawImage(team1Logo, team1X, team1Y, logoSize, logoSize);
+
+            // 載入並繪製隊伍 2 Logo
+            const team2Logo = await loadImage(team2LogoPath);
+            const team2X = (canvasWidth / 2) + (vsTextSize / 2) + padding; // 調整位置
+            const team2Y = (canvasHeight - logoSize) / 2;
+            context.drawImage(team2Logo, team2X, team2Y, logoSize, logoSize);
+
+            // 繪製 'vs' 文字
+            context.font = `${vsTextSize}px Impact`; // 保持 Impact 字體
+            context.fillStyle = '#FFFFFF'; // 白色文字
+            context.textAlign = 'center';
+            context.textBaseline = 'middle';
+            context.fillText('vs', canvasWidth / 2, canvasHeight / 2);
+
+            // 將畫布轉換為圖片 Buffer
+            const buffer = canvas.toBuffer('image/png');
+            const matchImageName = 'match_title.png';
+            files.push(new AttachmentBuilder(buffer, { name: matchImageName }));
+            embed.setImage(`attachment://${matchImageName}`); // 將組合圖片設定為主要圖片
+        } else {
+            // 如果無法獲取 logo，則退回使用文字標題
+            embed.setTitle(`**${match.team1}** vs **${match.team2}**`);
+            console.warn(`無法為 ${match.team1} 或 ${match.team2} 載入 logo，使用文字標題。`);
+        }
+
+        return { embed, files };
     }
 
     createPredictButton(matchId) {
+        console.log('創建預測按鈕，比賽ID:', matchId);
         const button = new ButtonBuilder()
             .setCustomId(`predict_${matchId}`)
             .setLabel('🎯 進行預測')
@@ -271,10 +354,20 @@ class LOLPredictionBot {
     }
 
     async handlePredictionInteraction(interaction) {
-        const matchId = interaction.customId.split('_')[1];
+        // 移除 'predict_' 前綴，保留完整的比賽 ID
+        const matchId = interaction.customId.replace('predict_', '');
+        console.log('預測按鈕點擊，完整 customId:', interaction.customId);
+        console.log('解析後的比賽ID:', matchId);
+        console.log('當前活躍比賽:', Array.from(this.activeMatches.keys()));
+        
         const match = this.activeMatches.get(matchId);
+        console.log('找到的比賽資料:', match);
         
         if (!match) {
+            console.log('找不到比賽資料，可能原因：');
+            console.log('1. 比賽已過期');
+            console.log('2. 比賽ID不匹配');
+            console.log('3. activeMatches 未正確更新');
             return interaction.reply({ content: '此比賽已不可預測！', ephemeral: true });
         }
 
@@ -324,11 +417,70 @@ class LOLPredictionBot {
         
         if (!channel) return;
 
+        const matchDate = new Date(match.time);
+        const formattedDate = matchDate.toISOString().split('T')[0];
+        const formattedTime = matchDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' });
+
         const resultEmbed = new EmbedBuilder()
             .setColor(0xFF0000)
-            .setTitle('比賽結果')
             .setDescription(`${result.winner} 獲勝！比分: ${result.score}`)
-            .setTimestamp();
+            .addFields(
+                { name: '比賽日期', value: formattedDate, inline: true },
+                { name: '比賽時間 (UTC)', value: formattedTime, inline: true },
+                { name: '賽制', value: match.format, inline: true }
+            )
+            .setTimestamp()
+            .setFooter({ text: 'LOL Esports Prediction Bot' });
+
+        const files = [];
+
+        // 獲取並快取隊伍 Logo
+        const team1LogoPath = await this.scraper.getOrCacheTeamLogo(match.team1);
+        const team2LogoPath = await this.scraper.getOrCacheTeamLogo(match.team2);
+
+        if (team1LogoPath && team2LogoPath) {
+            const canvasWidth = 800; // 畫布寬度
+            const canvasHeight = 150; // 畫布高度
+            const logoSize = 100; // Logo 圖片大小
+            const vsTextSize = 80; // 'vs' 文字大小，進一步調大
+            const padding = 100; // 大幅增加隊伍 Logo 與 "vs" 文字之間的間距
+
+            const canvas = createCanvas(canvasWidth, canvasHeight);
+            const context = canvas.getContext('2d');
+
+            // 恢復背景填充
+            context.fillStyle = '#1e2124'; 
+            context.fillRect(0, 0, canvasWidth, canvasHeight);
+
+            // 載入並繪製隊伍 1 Logo
+            const team1Logo = await loadImage(team1LogoPath);
+            const team1X = (canvasWidth / 2) - logoSize - (vsTextSize / 2) - padding; // 調整位置
+            const team1Y = (canvasHeight - logoSize) / 2;
+            context.drawImage(team1Logo, team1X, team1Y, logoSize, logoSize);
+
+            // 載入並繪製隊伍 2 Logo
+            const team2Logo = await loadImage(team2LogoPath);
+            const team2X = (canvasWidth / 2) + (vsTextSize / 2) + padding; // 調整位置
+            const team2Y = (canvasHeight - logoSize) / 2;
+            context.drawImage(team2Logo, team2X, team2Y, logoSize, logoSize);
+
+            // 繪製 'vs' 文字
+            context.font = `${vsTextSize}px Impact`; // 保持 Impact 字體
+            context.fillStyle = '#FFFFFF'; // 白色文字
+            context.textAlign = 'center';
+            context.textBaseline = 'middle';
+            context.fillText('vs', canvasWidth / 2, canvasHeight / 2);
+
+            // 將畫布轉換為圖片 Buffer
+            const buffer = canvas.toBuffer('image/png');
+            const matchImageName = 'result_match_title.png';
+            files.push(new AttachmentBuilder(buffer, { name: matchImageName }));
+            resultEmbed.setImage(`attachment://${matchImageName}`); // 將組合圖片設定為主要圖片
+        } else {
+            // 如果無法獲取 logo，則退回使用文字標題
+            resultEmbed.setTitle(`比賽結果: **${match.team1}** vs **${match.team2}**`);
+            console.warn(`無法為 ${match.team1} 或 ${match.team2} 載入 logo，使用文字標題。`);
+        }
 
         const userResults = [];
         
@@ -361,7 +513,7 @@ class LOLPredictionBot {
             });
         }
 
-        await channel.send({ embeds: [resultEmbed] });
+        await channel.send({ embeds: [resultEmbed], files: files });
     }
 
     evaluatePrediction(prediction, result) {
@@ -399,263 +551,3 @@ class LOLPredictionBot {
 // 啟動機器人
 const bot = new LOLPredictionBot();
 bot.start();
-
-// database.js
-const sqlite3 = require('sqlite3').verbose();
-
-class Database {
-    constructor() {
-        this.db = new sqlite3.Database('predictions.db');
-        this.init();
-    }
-
-    init() {
-        this.db.serialize(() => {
-            // 使用者統計表
-            this.db.run(`
-                CREATE TABLE IF NOT EXISTS user_stats (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT NOT NULL,
-                    guild_id TEXT NOT NULL,
-                    perfect INTEGER DEFAULT 0,
-                    winner INTEGER DEFAULT 0,
-                    failed INTEGER DEFAULT 0,
-                    UNIQUE(user_id, guild_id)
-                )
-            `);
-
-            // 預測記錄表
-            this.db.run(`
-                CREATE TABLE IF NOT EXISTS predictions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    match_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    guild_id TEXT NOT NULL,
-                    prediction TEXT NOT NULL,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            `);
-        });
-    }
-
-    async getUserStats(userId, guildId) {
-        return new Promise((resolve, reject) => {
-            this.db.get(
-                'SELECT * FROM user_stats WHERE user_id = ? AND guild_id = ?',
-                [userId, guildId],
-                (err, row) => {
-                    if (err) reject(err);
-                    resolve(row || { perfect: 0, winner: 0, failed: 0 });
-                }
-            );
-        });
-    }
-
-    async updateUserStats(userId, guildId, status) {
-        const stats = await this.getUserStats(userId, guildId);
-        
-        return new Promise((resolve, reject) => {
-            const query = `
-                INSERT OR REPLACE INTO user_stats 
-                (user_id, guild_id, perfect, winner, failed) 
-                VALUES (?, ?, ?, ?, ?)
-            `;
-            
-            const newStats = {
-                perfect: stats.perfect + (status === 'perfect' ? 1 : 0),
-                winner: stats.winner + (status === 'winner' ? 1 : 0),
-                failed: stats.failed + (status === 'failed' ? 1 : 0)
-            };
-
-            this.db.run(query, [userId, guildId, newStats.perfect, newStats.winner, newStats.failed], 
-                function(err) {
-                    if (err) reject(err);
-                    else resolve();
-                }
-            );
-        });
-    }
-
-    async savePrediction(matchId, userId, guildId, prediction) {
-        return new Promise((resolve, reject) => {
-            this.db.run(
-                'INSERT INTO predictions (match_id, user_id, guild_id, prediction) VALUES (?, ?, ?, ?)',
-                [matchId, userId, guildId, prediction],
-                function(err) {
-                    if (err) reject(err);
-                    else resolve();
-                }
-            );
-        });
-    }
-
-    async getUserPredictionForMatch(userId, guildId, matchId) {
-        return new Promise((resolve, reject) => {
-            this.db.get(
-                'SELECT * FROM predictions WHERE user_id = ? AND guild_id = ? AND match_id = ?',
-                [userId, guildId, matchId],
-                (err, row) => {
-                    if (err) reject(err);
-                    else resolve(row);
-                }
-            );
-        });
-    }
-
-    async getGuildLeaderboard(guildId) {
-        return new Promise((resolve, reject) => {
-            this.db.all(
-                `SELECT user_id, perfect, winner, failed, 
-                        (perfect + winner) as correct_predictions,
-                        (perfect + winner + failed) as total_predictions
-                 FROM user_stats 
-                 WHERE guild_id = ? AND (perfect + winner + failed) > 0
-                 ORDER BY perfect DESC, winner DESC, total_predictions DESC
-                 LIMIT 10`,
-                [guildId],
-                (err, rows) => {
-                    if (err) reject(err);
-                    else resolve(rows || []);
-                }
-            );
-        });
-    }
-}
-
-module.exports = Database;
-
-// scraper.js
-const axios = require('axios');
-const cheerio = require('cheerio');
-
-class MatchScraper {
-    constructor() {
-        this.baseUrl = 'https://lolesports.com';
-        this.leaguepediaUrl = 'https://lol.fandom.com';
-    }
-
-    async getTodayAndTomorrowMatches() {
-        try {
-            // 這裡需要根據實際的API或網頁結構來調整
-            const response = await axios.get(`${this.baseUrl}/schedule`);
-            const $ = cheerio.load(response.data);
-            
-            const matches = [];
-            
-            // 解析比賽資料的邏輯
-            $('.match-item').each((index, element) => {
-                const match = this.parseMatchElement($, element);
-                if (this.isMatchToday(match.time) || this.isMatchTomorrow(match.time)) {
-                    matches.push(match);
-                }
-            });
-            
-            return matches;
-        } catch (error) {
-            console.error('爬取比賽資料錯誤:', error);
-            return [];
-        }
-    }
-
-    parseMatchElement($, element) {
-        const team1 = $(element).find('.team1').text().trim();
-        const team2 = $(element).find('.team2').text().trim();
-        const time = $(element).find('.match-time').text().trim();
-        const tournament = $(element).find('.tournament').text().trim();
-        const format = this.determineFormat($(element).find('.format').text().trim());
-        const id = $(element).attr('data-match-id') || `${team1}-${team2}-${Date.now()}`;
-        
-        return {
-            id,
-            team1,
-            team2,
-            time,
-            tournament,
-            format
-        };
-    }
-
-    determineFormat(formatText) {
-        if (formatText.includes('BO5') || formatText.includes('Best of 5')) {
-            return 'BO5';
-        } else if (formatText.includes('BO3') || formatText.includes('Best of 3')) {
-            return 'BO3';
-        } else {
-            return 'BO1';
-        }
-    }
-
-    isMatchToday(matchTime) {
-        const today = new Date();
-        const matchDate = new Date(matchTime);
-        return matchDate.toDateString() === today.toDateString();
-    }
-
-    isMatchTomorrow(matchTime) {
-        const tomorrow = new Date();
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        const matchDate = new Date(matchTime);
-        return matchDate.toDateString() === tomorrow.toDateString();
-    }
-
-    async getMatchResult(matchId) {
-        try {
-            // 檢查比賽是否結束並獲取結果
-            const response = await axios.get(`${this.baseUrl}/match/${matchId}`);
-            const $ = cheerio.load(response.data);
-            
-            const finished = $('.match-status').text().includes('Finished');
-            
-            if (!finished) {
-                return null;
-            }
-            
-            const winner = $('.winner').text().trim();
-            const score = $('.final-score').text().trim();
-            
-            return {
-                finished: true,
-                winner,
-                score
-            };
-        } catch (error) {
-            console.error('獲取比賽結果錯誤:', error);
-            return null;
-        }
-    }
-
-    validatePrediction(prediction, format) {
-        const regex = /^(\d+):(\d+)$/;
-        const match = prediction.match(regex);
-        
-        if (!match) {
-            return { valid: false, error: '格式錯誤！請使用 num:num 格式' };
-        }
-        
-        const [, score1, score2] = match;
-        const num1 = parseInt(score1);
-        const num2 = parseInt(score2);
-        
-        if (num1 < 0 || num2 < 0) {
-            return { valid: false, error: '分數不能為負數！' };
-        }
-        
-        const maxWins = format === 'BO5' ? 3 : (format === 'BO3' ? 2 : 1);
-        
-        if (num1 > maxWins || num2 > maxWins) {
-            return { valid: false, error: `${format} 最高只能到 ${maxWins} 勝！` };
-        }
-        
-        if (num1 === maxWins && num2 === maxWins) {
-            return { valid: false, error: '兩隊不能同時達到最高勝場！' };
-        }
-        
-        if (num1 < maxWins && num2 < maxWins) {
-            return { valid: false, error: '必須有一隊達到獲勝條件！' };
-        }
-        
-        return { valid: true };
-    }
-}
-
-module.exports = MatchScraper;

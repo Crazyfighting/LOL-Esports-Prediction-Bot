@@ -7,16 +7,23 @@
     "start": "node index.js"
   },
   "dependencies": {
+    "axios": "^1.6.7",
+    "canvas": "^3.1.0",
+    "cheerio": "^1.0.0-rc.12",
     "discord.js": "^14.14.1",
     "node-cron": "^3.0.3",
-    "sqlite3": "^5.1.7",
-    "axios": "^1.6.7",
-    "cheerio": "^1.0.0-rc.12"
+    "sqlite3": "^5.1.7"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
   },
-  "keywords": ["discord", "bot", "lol", "esports", "prediction"],
+  "keywords": [
+    "discord",
+    "bot",
+    "lol",
+    "esports",
+    "prediction"
+  ],
   "author": "Crazyfighting",
   "license": "MIT"
 }
