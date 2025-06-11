@@ -301,6 +301,8 @@ class LOLPredictionBot {
         modal.addComponents(new ActionRowBuilder().addComponents(predictionInput));
         return modal;
     }
+
+    async checkMatchResults() {
         for (const [matchId, match] of this.activeMatches) {
             const result = await this.scraper.getMatchResult(matchId);
             
