@@ -140,16 +140,6 @@ class MatchScraper {
                         console.log(`- ${league}`);
                     });
 
-                    // 輸出所有比賽資料
-                    console.log('\n所有比賽資料：');
-                    matches.forEach(match => {
-                        const matchData = match.title;
-                        const leagueName = matchData.OverviewPage.split('/')[0];
-                        console.log(`\n比賽：${matchData.Team1} vs ${matchData.Team2}`);
-                        console.log(`時間：${matchData['DateTime UTC']}`);
-                        console.log(`聯賽：${leagueName}`);
-                        console.log(`賽制：BO${matchData.BestOf}`);
-                    });
 
                     for (const match of matches) {
                         const matchData = match.title;
@@ -189,19 +179,18 @@ class MatchScraper {
 
     parseLeaguepediaMatch(matchData) {
         const format = matchData.BestOf === '3' ? 'BO3' : (matchData.BestOf === '5' ? 'BO5' : 'BO1');
-        const time = new Date(matchData['DateTime UTC']).toISOString();
-        
-        // 生成獨特的比賽 ID：聯賽名稱_隊伍1_隊伍2
+        const time = new Date(`${matchData['DateTime UTC']}Z`).toISOString();
         const leagueName = matchData.OverviewPage.split('/')[0];
         const uniqueId = `${leagueName}_${matchData.Team1}_${matchData.Team2}`;
-        
         return {
-            id: uniqueId,  // 使用獨特的比賽 ID
+            id: matchData.MatchId, // 直接用 Leaguepedia 的 MatchId
+            uniqueId: uniqueId,    // 保留自組 id 以防萬一
             team1: matchData.Team1,
             team2: matchData.Team2,
             time: time,
             tournament: matchData.OverviewPage,
-            format: format
+            format: format,
+            league: leagueName
         };
     }
 
@@ -282,6 +271,73 @@ class MatchScraper {
         }
         
         return { valid: true };
+    }
+
+    async getMatchesInRange(startDate, endDate, finishedOnly = false) {
+        const startStr = startDate.toISOString().slice(0, 19).replace('T', ' ');
+        const endStr = endDate.toISOString().slice(0, 19).replace('T', ' ');
+        let where = `DateTime_UTC >= '${startStr}' AND DateTime_UTC <= '${endStr}'`;
+        const leagueKeys = Object.keys(this.leagues);
+        const leagueWhere = leagueKeys.map(l => `OverviewPage LIKE '${l}%'`).join(' OR ');
+        where = `(${where}) AND (${leagueWhere})`;
+        if (finishedOnly) {
+            where += " AND Team1Score IS NOT NULL AND Team2Score IS NOT NULL";
+        }
+        const response = await axios.get(this.baseUrl, {
+            params: {
+                action: 'cargoquery',
+                format: 'json',
+                tables: 'MatchSchedule',
+                fields: 'Team1,Team2,DateTime_UTC,BestOf,Team1Score,Team2Score,MatchId,OverviewPage',
+                where,
+                order_by: 'DateTime_UTC ASC'
+            }
+        });
+        if (response.data && response.data.cargoquery) {
+            // 解析 leagueName 並只回傳主要聯賽
+            const matches = response.data.cargoquery.map(match => {
+                const matchData = match.title;
+                const leagueName = matchData.OverviewPage.split('/')[0];
+                if (!leagueKeys.includes(leagueName)) return null;
+                const matchInfo = this.parseLeaguepediaMatch(matchData);
+                matchInfo.league = leagueName;
+                return matchInfo;
+            }).filter(Boolean);
+            return matches;
+        }
+        return [];
+    }
+
+    async checkMatchResult(matchId) {
+        try {
+            const response = await axios.get(this.baseUrl, {
+                params: {
+                    action: 'cargoquery',
+                    format: 'json',
+                    tables: 'MatchSchedule',
+                    fields: 'Team1,Team2,Team1Score,Team2Score,DateTime_UTC',
+                    where: `MatchId = "${matchId}"`
+                }
+            });
+
+            if (response.data && response.data.cargoquery && response.data.cargoquery.length > 0) {
+                const match = response.data.cargoquery[0].title;
+                if (match.Team1Score !== null && match.Team2Score !== null) {
+                    return {
+                        isFinished: true,
+                        result: {
+                            winner: parseInt(match.Team1Score) > parseInt(match.Team2Score) ? match.Team1 : match.Team2,
+                            score: `${match.Team1Score}:${match.Team2Score}`
+                        }
+                    };
+                }
+            }
+            
+            return { isFinished: false };
+        } catch (error) {
+            console.error(`檢查比賽結果時發生錯誤 (${matchId}):`, error);
+            return { isFinished: false };
+        }
     }
 }
 

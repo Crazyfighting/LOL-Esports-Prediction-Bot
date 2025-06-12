@@ -20,8 +20,6 @@ class LOLPredictionBot {
         
         this.db = new Database();
         this.scraper = new MatchScraper();
-        this.activeMatches = new Map();
-        this.predictions = new Map();
         
         this.setupEventHandlers();
         this.setupCronJobs();
@@ -70,6 +68,26 @@ class LOLPredictionBot {
             {
                 name: 'leaderboard',
                 description: '查看伺服器預測排行榜'
+            },
+            {
+                name: 'mypredictions',
+                description: '查看你所有預測過的比賽與比分'
+            },
+            {
+                name: 'setbroadcastchannel',
+                description: '設定本伺服器的廣播頻道（僅限管理員）',
+                options: [
+                    {
+                        name: 'channel',
+                        description: '要設定的廣播頻道',
+                        type: 7, // CHANNEL type
+                        required: true
+                    }
+                ]
+            },
+            {
+                name: 'testpastmatch',
+                description: '顯示過去2天已結束的比賽（測試用）'
             }
         ];
 
@@ -91,8 +109,8 @@ class LOLPredictionBot {
     }
 
     setupCronJobs() {
-        // 每5分鐘檢查比賽結果
-        cron.schedule('*/5 * * * *', async () => {
+        // 每2分鐘檢查比賽結果
+        cron.schedule('*/2 * * * *', async () => {
             await this.checkMatchResults();
         });
 
@@ -115,6 +133,15 @@ class LOLPredictionBot {
             case 'leaderboard':
                 await this.showLeaderboard(interaction);
                 break;
+            case 'mypredictions':
+                await this.showMyPredictions(interaction);
+                break;
+            case 'setbroadcastchannel':
+                await this.setBroadcastChannel(interaction);
+                break;
+            case 'testpastmatch':
+                await this.showPastMatches(interaction);
+                break;
             default:
                 await interaction.reply({ content: '未知的命令！', ephemeral: true });
         }
@@ -127,9 +154,8 @@ class LOLPredictionBot {
         const matchId = interaction.customId.replace('prediction_', '');
         console.log('Modal 提交，完整 customId:', interaction.customId);
         console.log('解析後的比賽ID:', matchId);
-        console.log('當前活躍比賽:', Array.from(this.activeMatches.keys()));
         
-        const match = this.activeMatches.get(matchId);
+        const match = await this.db.getSingleBroadcastedMatch(interaction.guild.id, matchId);
         console.log('找到的比賽資料:', match);
         
         if (!match) {
@@ -170,12 +196,16 @@ class LOLPredictionBot {
             });
         }
 
-        // 保存預測
+        // 保存預測（含比賽日期與隊伍名稱與 uniqueId）
         await this.db.savePrediction(
-            matchId, 
+            match.id, 
             interaction.user.id, 
             interaction.guild.id, 
-            prediction
+            prediction,
+            match.time,
+            match.team1,
+            match.team2,
+            match.uniqueId
         );
 
         await interaction.reply({ 
@@ -184,41 +214,26 @@ class LOLPredictionBot {
         });
     }
 
+    // 共用：產生比賽訊息（embed, button, files）
+    async createMatchMessage(match) {
+        const { embed, files } = await this.createMatchEmbed(match);
+        const button = this.createPredictButton(match.id);
+        return { embed, files, button };
+    }
+
     async showUpcomingMatches(interaction) {
         await interaction.deferReply();
-        
         try {
             const matches = await this.scraper.getTodayAndTomorrowMatches();
-            
             if (matches.length === 0) {
                 return interaction.followUp('目前沒有即將舉行的比賽！');
             }
-
-            // 清空之前的活躍比賽
-            this.activeMatches.clear();
-            console.log('已清空活躍比賽列表');
-
             for (const match of matches) {
                 console.log('處理比賽:', match);
-                const { embed, files } = await this.createMatchEmbed(match);
-                const button = this.createPredictButton(match.id);
-                
-                await interaction.followUp({
-                    embeds: [embed],
-                    components: [button],
-                    files: files
-                });
-                
-                // 確保比賽資料被正確加入
-                this.activeMatches.set(match.id, {
-                    ...match,
-                    guildId: interaction.guild.id,
-                    channelId: interaction.channel.id
-                });
-                console.log('已加入活躍比賽:', match.id);
+                const { embed, files, button } = await this.createMatchMessage(match);
+                await interaction.followUp({ embeds: [embed], components: [button], files });
+                await this.db.addBroadcastedMatch(interaction.guild.id, match.id, match);
             }
-
-            console.log('當前活躍比賽列表:', Array.from(this.activeMatches.keys()));
         } catch (error) {
             console.error('獲取比賽資料錯誤:', error);
             interaction.followUp('獲取比賽資料時發生錯誤！');
@@ -274,16 +289,56 @@ class LOLPredictionBot {
         await interaction.reply({ embeds: [embed] });
     }
 
+    async showMyPredictions(interaction) {
+        await interaction.deferReply({ ephemeral: true });
+        const userId = interaction.user.id;
+        const guildId = interaction.guild.id;
+
+        // 只查 predictions 資料表
+        const predictions = await this.db.getUserPredictions(userId, guildId);
+
+        if (!predictions || predictions.length === 0) {
+            await interaction.followUp({ content: '你目前沒有任何預測紀錄！', ephemeral: true });
+            return;
+        }
+
+        const embed = new EmbedBuilder()
+            .setColor(0x00BFFF)
+            .setTitle(`${interaction.user.username} 的所有預測紀錄`)
+            .setDescription('以下是你所有預測過的比賽：');
+
+        for (const pred of predictions) {
+            let value = '';
+            if (pred.match_date && pred.team1 && pred.team2) {
+                // 格式化日期
+                const matchDate = new Date(pred.match_date);
+                const localDate = new Intl.DateTimeFormat('zh-TW', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Taipei' }).format(matchDate);
+                value = `日期：${localDate}\n${pred.team1} vs ${pred.team2}\n預測比分：${pred.prediction}`;
+            } else {
+                value = `${pred.match_id}\n預測比分：${pred.prediction}`;
+            }
+            embed.addFields({
+                name: '\u200B',
+                value,
+                inline: false
+            });
+        }
+
+        await interaction.followUp({ embeds: [embed], ephemeral: true });
+    }
+
     async createMatchEmbed(match) {
         const matchDate = new Date(match.time);
-        const formattedDate = matchDate.toISOString().split('T')[0]; // Gets YYYY-MM-DD
-        const formattedTime = matchDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' });
+        
+        // 格式化為台灣本地時間 (UTC+8)
+        const localDate = new Intl.DateTimeFormat('zh-TW', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Taipei' }).format(matchDate);
+        const localTime = new Intl.DateTimeFormat('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Taipei' }).format(matchDate);
 
         const embed = new EmbedBuilder()
             .setColor(0x0099FF)
             .addFields(
-                { name: '日期', value: formattedDate, inline: true },
-                { name: '時間 (UTC)', value: formattedTime, inline: true },
+                { name: '日期', value: localDate, inline: true },
+                { name: '時間 (UTC+8)', value: localTime, inline: true },
                 { name: '賽制', value: match.format, inline: true },
                 { name: '聯賽/系列賽', value: match.tournament, inline: false }
             )
@@ -354,13 +409,14 @@ class LOLPredictionBot {
     }
 
     async handlePredictionInteraction(interaction) {
+        if (!interaction.customId.startsWith('predict_')) return;
+
         // 移除 'predict_' 前綴，保留完整的比賽 ID
         const matchId = interaction.customId.replace('predict_', '');
         console.log('預測按鈕點擊，完整 customId:', interaction.customId);
         console.log('解析後的比賽ID:', matchId);
-        console.log('當前活躍比賽:', Array.from(this.activeMatches.keys()));
         
-        const match = this.activeMatches.get(matchId);
+        const match = await this.db.getSingleBroadcastedMatch(interaction.guild.id, matchId);
         console.log('找到的比賽資料:', match);
         
         if (!match) {
@@ -395,125 +451,235 @@ class LOLPredictionBot {
         return modal;
     }
 
-    async checkMatchResults() {
-        for (const [matchId, match] of this.activeMatches) {
-            const result = await this.scraper.getMatchResult(matchId);
-            
-            if (result && result.finished) {
-                await this.processMatchResult(matchId, result);
-                this.activeMatches.delete(matchId);
+    async setBroadcastChannel(interaction) {
+        try {
+            if (!interaction.memberPermissions.has('ADMINISTRATOR')) {
+                return interaction.reply({ content: '你沒有足夠的權限執行此命令！', ephemeral: true });
             }
+
+            const channel = interaction.options.getChannel('channel');
+            console.log('獲取到的頻道:', channel);
+
+            if (!channel) {
+                return interaction.reply({ 
+                    content: '請指定一個有效的頻道！', 
+                    ephemeral: true 
+                });
+            }
+
+            if (!interaction.guild) {
+                return interaction.reply({
+                    content: '無法獲取伺服器資訊！',
+                    ephemeral: true
+                });
+            }
+
+            console.log('正在設定廣播頻道:', {
+                guildId: interaction.guild.id,
+                channelId: channel.id
+            });
+
+            await this.db.setBroadcastChannel(interaction.guild.id, channel.id);
+            
+            console.log('廣播頻道設定成功');
+            
+            await interaction.reply({
+                content: `廣播頻道已設定為 ${channel}！`,
+                ephemeral: true
+            });
+        } catch (error) {
+            console.error('設定廣播頻道時發生錯誤:', error);
+            await interaction.reply({
+                content: '設定廣播頻道時發生錯誤，請稍後再試！',
+                ephemeral: true
+            });
         }
     }
 
-    async processMatchResult(matchId, result) {
-        const predictions = await this.db.getMatchPredictions(matchId);
-        const match = this.activeMatches.get(matchId);
-        
-        if (!match) return;
+    async updateUpcomingMatches() {
+        console.log('更新即將開始的比賽...');
+        try {
+            const guilds = await this.db.getAllGuildsWithBroadcastChannel();
 
-        const guild = this.client.guilds.cache.get(match.guildId);
-        const channel = guild?.channels.cache.get(match.channelId);
-        
-        if (!channel) return;
+            for (const guildData of guilds) {
+                const guildId = guildData.guild_id;
+                const channelId = guildData.broadcast_channel_id;
+                const guild = this.client.guilds.cache.get(guildId);
+                const channel = guild?.channels.cache.get(channelId);
 
-        const matchDate = new Date(match.time);
-        const formattedDate = matchDate.toISOString().split('T')[0];
-        const formattedTime = matchDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' });
+                if (!channel) {
+                    console.log(`[updateUpcomingMatches] 找不到廣播頻道或伺服器: guildId=${guildId}, channelId=${channelId}`);
+                    continue;
+                }
 
-        const resultEmbed = new EmbedBuilder()
-            .setColor(0xFF0000)
-            .setDescription(`${result.winner} 獲勝！比分: ${result.score}`)
-            .addFields(
-                { name: '比賽日期', value: formattedDate, inline: true },
-                { name: '比賽時間 (UTC)', value: formattedTime, inline: true },
-                { name: '賽制', value: match.format, inline: true }
-            )
-            .setTimestamp()
-            .setFooter({ text: 'LOL Esports Prediction Bot' });
+                const upcomingMatches = await this.scraper.getTodayAndTomorrowMatches();
+                const broadcastedMatches = await this.db.getBroadcastedMatches(guildId);
+                const broadcastedMatchIds = new Set(broadcastedMatches.map(m => m.id));
 
-        const files = [];
-
-        // 獲取並快取隊伍 Logo
-        const team1LogoPath = await this.scraper.getOrCacheTeamLogo(match.team1);
-        const team2LogoPath = await this.scraper.getOrCacheTeamLogo(match.team2);
-
-        if (team1LogoPath && team2LogoPath) {
-            const canvasWidth = 800; // 畫布寬度
-            const canvasHeight = 150; // 畫布高度
-            const logoSize = 100; // Logo 圖片大小
-            const vsTextSize = 80; // 'vs' 文字大小，進一步調大
-            const padding = 100; // 大幅增加隊伍 Logo 與 "vs" 文字之間的間距
-
-            const canvas = createCanvas(canvasWidth, canvasHeight);
-            const context = canvas.getContext('2d');
-
-            // 恢復背景填充
-            context.fillStyle = '#1e2124'; 
-            context.fillRect(0, 0, canvasWidth, canvasHeight);
-
-            // 載入並繪製隊伍 1 Logo
-            const team1Logo = await loadImage(team1LogoPath);
-            const team1X = (canvasWidth / 2) - logoSize - (vsTextSize / 2) - padding; // 調整位置
-            const team1Y = (canvasHeight - logoSize) / 2;
-            context.drawImage(team1Logo, team1X, team1Y, logoSize, logoSize);
-
-            // 載入並繪製隊伍 2 Logo
-            const team2Logo = await loadImage(team2LogoPath);
-            const team2X = (canvasWidth / 2) + (vsTextSize / 2) + padding; // 調整位置
-            const team2Y = (canvasHeight - logoSize) / 2;
-            context.drawImage(team2Logo, team2X, team2Y, logoSize, logoSize);
-
-            // 繪製 'vs' 文字
-            context.font = `${vsTextSize}px Impact`; // 保持 Impact 字體
-            context.fillStyle = '#FFFFFF'; // 白色文字
-            context.textAlign = 'center';
-            context.textBaseline = 'middle';
-            context.fillText('vs', canvasWidth / 2, canvasHeight / 2);
-
-            // 將畫布轉換為圖片 Buffer
-            const buffer = canvas.toBuffer('image/png');
-            const matchImageName = 'result_match_title.png';
-            files.push(new AttachmentBuilder(buffer, { name: matchImageName }));
-            resultEmbed.setImage(`attachment://${matchImageName}`); // 將組合圖片設定為主要圖片
-        } else {
-            // 如果無法獲取 logo，則退回使用文字標題
-            resultEmbed.setTitle(`比賽結果: **${match.team1}** vs **${match.team2}**`);
-            console.warn(`無法為 ${match.team1} 或 ${match.team2} 載入 logo，使用文字標題。`);
+                for (const match of upcomingMatches) {
+                    if (!broadcastedMatchIds.has(match.id)) {
+                        console.log(`[updateUpcomingMatches] 廣播新比賽至伺服器 ${guildId}: ${match.id}`);
+                        const { embed, files, button } = await this.createMatchMessage(match);
+                        await channel.send({ embeds: [embed], components: [button], files });
+                        await this.db.addBroadcastedMatch(guildId, match.id, match);
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('更新即將開始的比賽時發生錯誤:', error);
         }
+    }
 
-        const userResults = [];
-        
-        for (const prediction of predictions) {
-            const status = this.evaluatePrediction(prediction.prediction, result);
-            await this.db.updateUserStats(prediction.userId, match.guildId, status);
+    async checkMatchResults() {
+        console.log('檢查比賽結果...');
+        try {
+            // 獲取所有已設定廣播頻道的伺服器
+            const guilds = await this.db.getAllGuildsWithBroadcastChannel(); // 假設有這個方法
             
-            const user = await this.client.users.fetch(prediction.userId);
-            userResults.push({
-                user: user.username,
-                prediction: prediction.prediction,
-                status: status
-            });
+            for (const guild of guilds) {
+                const broadcastedMatches = await this.db.getBroadcastedMatches(guild.guild_id);
+                
+                for (const broadcastedMatch of broadcastedMatches) {
+                    const match = broadcastedMatch.data; // 完整的比賽資料
+                    const matchId = match.id; // Leaguepedia 原始 MatchId
+                    console.log(`檢查伺服器 ${guild.guild_id} 中的比賽結果:`, matchId);
+                    
+                    // 檢查比賽是否已結束
+                    const checkResult = await this.scraper.checkMatchResult(matchId);
+
+                    if (checkResult.isFinished) {
+                        console.log(`比賽已結束: ${matchId}`);
+                        await this.processMatchResult(match, checkResult.result, guild.guild_id);
+                    } else {
+                        // console.log(`比賽尚未結束或結果不可用: ${matchId}`); // 減少日誌頻率
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('檢查比賽結果時發生錯誤:', error);
         }
+    }
 
-        // 只顯示當前伺服器的結果
-        const guildMembers = await guild.members.fetch();
-        const filteredResults = userResults.filter(result => 
-            guildMembers.has(this.client.users.cache.find(u => u.username === result.user)?.id)
-        );
+    async processMatchResult(match, result, guildId) {
+        try {
+            console.log(`[processMatchResult] 廣播比賽結果: ${match.id}`);
+            const predictions = await this.db.getMatchPredictions(match.id);
+            // 廣播到綁定頻道
+            const guild = this.client.guilds.cache.get(guildId);
+            const channelId = await this.db.getBroadcastChannel(guildId);
+            const channel = guild?.channels.cache.get(channelId);
+            if (!channel) {
+                console.log(`[processMatchResult] 找不到廣播頻道: guildId=${guildId}, channelId=${channelId}`);
+                return;
+            }
 
-        if (filteredResults.length > 0) {
-            const resultsText = filteredResults.map(r => 
-                `${r.user}: ${r.prediction} - ${this.getStatusEmoji(r.status)}`
-            ).join('\n');
+            const matchDate = new Date(match.time);
+            
+            // 格式化為台灣本地時間 (UTC+8)
+            const localDate = new Intl.DateTimeFormat('zh-TW', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Taipei' }).format(matchDate);
+            const localTime = new Intl.DateTimeFormat('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Taipei' }).format(matchDate);
 
-            resultEmbed.addFields({
-                name: '預測結果',
-                value: resultsText
-            });
+            const resultEmbed = new EmbedBuilder()
+                .setColor(0xFF0000)
+                .setDescription(`${result.winner} 獲勝！比分: ${result.score}`)
+                .addFields(
+                    { name: '比賽日期', value: localDate, inline: true },
+                    { name: '比賽時間 (UTC+8)', value: localTime, inline: true },
+                    { name: '賽制', value: match.format, inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'LOL Esports Prediction Bot' });
+
+            const files = [];
+
+            // 獲取並快取隊伍 Logo
+            const team1LogoPath = await this.scraper.getOrCacheTeamLogo(match.team1);
+            const team2LogoPath = await this.scraper.getOrCacheTeamLogo(match.team2);
+
+            if (team1LogoPath && team2LogoPath) {
+                const canvasWidth = 800; // 畫布寬度
+                const canvasHeight = 150; // 畫布高度
+                const logoSize = 100; // Logo 圖片大小
+                const vsTextSize = 80; // 'vs' 文字大小，進一步調大
+                const padding = 100; // 大幅增加隊伍 Logo 與 "vs" 文字之間的間距
+
+                const canvas = createCanvas(canvasWidth, canvasHeight);
+                const context = canvas.getContext('2d');
+
+                // 恢復背景填充
+                context.fillStyle = '#1e2124'; 
+                context.fillRect(0, 0, canvasWidth, canvasHeight);
+
+                // 載入並繪製隊伍 1 Logo
+                const team1Logo = await loadImage(team1LogoPath);
+                const team1X = (canvasWidth / 2) - logoSize - (vsTextSize / 2) - padding; // 調整位置
+                const team1Y = (canvasHeight - logoSize) / 2;
+                context.drawImage(team1Logo, team1X, team1Y, logoSize, logoSize);
+
+                // 載入並繪製隊伍 2 Logo
+                const team2Logo = await loadImage(team2LogoPath);
+                const team2X = (canvasWidth / 2) + (vsTextSize / 2) + padding; // 調整位置
+                const team2Y = (canvasHeight - logoSize) / 2;
+                context.drawImage(team2Logo, team2X, team2Y, logoSize, logoSize);
+
+                // 繪製 'vs' 文字
+                context.font = `${vsTextSize}px Impact`; // 保持 Impact 字體
+                context.fillStyle = '#FFFFFF'; // 白色文字
+                context.textAlign = 'center';
+                context.textBaseline = 'middle';
+                context.fillText('vs', canvasWidth / 2, canvasHeight / 2);
+
+                // 將畫布轉換為圖片 Buffer
+                const buffer = canvas.toBuffer('image/png');
+                const matchImageName = 'result_match_title.png';
+                files.push(new AttachmentBuilder(buffer, { name: matchImageName }));
+                resultEmbed.setImage(`attachment://${matchImageName}`); // 將組合圖片設定為主要圖片
+            } else {
+                // 如果無法獲取 logo，則退回使用文字標題
+                resultEmbed.setTitle(`比賽結果: **${match.team1}** vs **${match.team2}**`);
+                console.warn(`無法為 ${match.team1} 或 ${match.team2} 載入 logo，使用文字標題。`);
+            }
+
+            const userResults = [];
+            
+            for (const prediction of predictions) {
+                const status = this.evaluatePrediction(prediction.prediction, result);
+                await this.db.updateUserStats(prediction.userId, guildId, status);
+                
+                const user = await this.client.users.fetch(prediction.userId);
+                userResults.push({
+                    user: user.username,
+                    prediction: prediction.prediction,
+                    status: status
+                });
+            }
+
+            // 只顯示當前伺服器的結果
+            const guildMembers = await guild.members.fetch();
+            const filteredResults = userResults.filter(result => 
+                guildMembers.has(this.client.users.cache.find(u => u.username === result.user)?.id)
+            );
+
+            if (filteredResults.length > 0) {
+                const resultsText = filteredResults.map(r => 
+                    `${r.user}: ${r.prediction} - ${this.getStatusEmoji(r.status)}`
+                ).join('\n');
+
+                resultEmbed.addFields({
+                    name: '預測結果',
+                    value: resultsText
+                });
+            }
+
+            await channel.send({ embeds: [resultEmbed], files: files });
+            console.log(`[processMatchResult] 已廣播比賽結果: ${match.id} 至頻道 ${channelId}`);
+
+            // 移除已廣播的比賽記錄
+            await this.db.removeBroadcastedMatch(guildId, match.id);
+
+        } catch (error) {
+            console.error(`處理比賽結果時發生錯誤 ${match.id}:`, error);
         }
-
-        await channel.send({ embeds: [resultEmbed], files: files });
     }
 
     evaluatePrediction(prediction, result) {
@@ -538,13 +704,42 @@ class LOLPredictionBot {
         }
     }
 
-    async updateUpcomingMatches() {
-        // 更新即將開始的比賽
-        console.log('更新比賽資料...');
+    async start() {
+        await this.client.login(token);
+        console.log('機器人已成功登入 Discord。');
+        // 開機時自動檢查並廣播即將開始的比賽
+        await this.updateUpcomingMatches();
     }
 
-    start() {
-        this.client.login(token);
+    async showPastMatches(interaction) {
+        await interaction.deferReply();
+        // 查詢過去2天已結束比賽
+        const now = new Date();
+        const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
+        const matches = await this.scraper.getMatchesInRange(twoDaysAgo, now, true); // true=已結束
+        // 用 scraper.leagues 的 key 做篩選
+        const leagueKeys = Object.keys(this.scraper.leagues);
+        console.log('[testpastmatch] 查詢到比賽數量:', matches.length);
+        matches.forEach(m => {
+            console.log(`[testpastmatch] ${m.league} | ${m.team1} vs ${m.team2} | ${m.time}`);
+        });
+        const filtered = matches.filter(m => leagueKeys.includes(m.league));
+        console.log('[testpastmatch] 篩選後主要聯賽比賽數量:', filtered.length);
+        if (!filtered || filtered.length === 0) {
+            await interaction.followUp('過去2天沒有主要聯賽的已結束比賽！');
+            return;
+        }
+        for (const match of filtered) {
+            const { embed, files, button } = await this.createMatchMessage(match);
+            await interaction.followUp({ embeds: [embed], components: [button], files });
+            // 將比賽資料存入 broadcasted_matches 表
+            try {
+                await this.db.addBroadcastedMatch(interaction.guild.id, match.id, match);
+                console.log(`[testpastmatch] 已將比賽 ${match.id} 加入廣播列表`);
+            } catch (error) {
+                console.error(`[testpastmatch] 加入比賽 ${match.id} 到廣播列表時發生錯誤:`, error);
+            }
+        }
     }
 }
 
