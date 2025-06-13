@@ -190,28 +190,34 @@ class LOLPredictionBot {
         );
         
         if (existingPrediction) {
-            return interaction.reply({ 
-                content: '你已經對這場比賽進行過預測了！', 
+            // 更新現有預測
+            await this.db.updatePrediction(
+                matchId,
+                interaction.user.id,
+                interaction.guild.id,
+                prediction
+            );
+            await interaction.reply({ 
+                content: `預測已更新！你預測 ${match.team1} vs ${match.team2} 的比分為 ${prediction}`, 
+                ephemeral: true 
+            });
+        } else {
+            // 保存新預測
+            await this.db.savePrediction(
+                match.id, 
+                interaction.user.id, 
+                interaction.guild.id, 
+                prediction,
+                match.time,
+                match.team1,
+                match.team2,
+                match.uniqueId
+            );
+            await interaction.reply({ 
+                content: `預測成功！你預測 ${match.team1} vs ${match.team2} 的比分為 ${prediction}`, 
                 ephemeral: true 
             });
         }
-
-        // 保存預測（含比賽日期與隊伍名稱與 uniqueId）
-        await this.db.savePrediction(
-            match.id, 
-            interaction.user.id, 
-            interaction.guild.id, 
-            prediction,
-            match.time,
-            match.team1,
-            match.team2,
-            match.uniqueId
-        );
-
-        await interaction.reply({ 
-            content: `預測成功！你預測 ${match.team1} vs ${match.team2} 的比分為 ${prediction}`, 
-            ephemeral: true 
-        });
     }
 
     // 共用：產生比賽訊息（embed, button, files）
@@ -519,14 +525,30 @@ class LOLPredictionBot {
             for (const guildData of guilds) {
                 const guildId = guildData.guild_id;
                 const channelId = guildData.broadcast_channel_id;
-                const guild = this.client.guilds.cache.get(guildId);
+                
+                // 改用 fetch 來獲取伺服器
+                let guild;
+                try {
+                    guild = await this.client.guilds.fetch(guildId);
+                } catch (error) {
+                    console.log(`[updateUpcomingMatches] 無法獲取伺服器: guildId=${guildId}`, error);
+                    continue;
+                }
                 
                 if (!guild) {
                     console.log(`[updateUpcomingMatches] 找不到伺服器: guildId=${guildId}`);
                     continue;
                 }
 
-                const channel = guild.channels.cache.get(channelId);
+                // 改用 fetch 來獲取頻道
+                let channel;
+                try {
+                    channel = await guild.channels.fetch(channelId);
+                } catch (error) {
+                    console.log(`[updateUpcomingMatches] 無法獲取頻道: guildId=${guildId}, channelId=${channelId}`, error);
+                    continue;
+                }
+
                 if (!channel) {
                     console.log(`[updateUpcomingMatches] 找不到頻道: guildId=${guildId}, channelId=${channelId}`);
                     continue;

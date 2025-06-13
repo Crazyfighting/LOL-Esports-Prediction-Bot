@@ -285,6 +285,25 @@ class Database {
             );
         });
     }
+
+    async updatePrediction(matchId, userId, guildId, prediction) {
+        try {
+            const query = `
+                UPDATE predictions 
+                SET prediction = ?, 
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE match_id = ? 
+                AND user_id = ? 
+                AND guild_id = ?
+            `;
+            
+            await this.query(query, [prediction, matchId, userId, guildId]);
+            console.log(`已更新預測: matchId=${matchId}, userId=${userId}, guildId=${guildId}, prediction=${prediction}`);
+        } catch (error) {
+            console.error('更新預測時發生錯誤:', error);
+            throw error;
+        }
+    }
 }
 
 module.exports = Database; 
