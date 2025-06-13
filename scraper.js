@@ -11,7 +11,8 @@ class MatchScraper {
             'LCK': 'LCK',
             'LPL': 'LPL',
             'LEC': 'LEC',
-            'LCS': 'LCS',
+            'LTA': 'LTA',
+            'LCP': 'LCP',
             'MSI': 'MSI',
             'Worlds': 'Worlds'
         };
@@ -276,13 +277,21 @@ class MatchScraper {
     async getMatchesInRange(startDate, endDate, finishedOnly = false) {
         const startStr = startDate.toISOString().slice(0, 19).replace('T', ' ');
         const endStr = endDate.toISOString().slice(0, 19).replace('T', ' ');
-        let where = `DateTime_UTC >= '${startStr}' AND DateTime_UTC <= '${endStr}'`;
-        const leagueKeys = Object.keys(this.leagues);
-        const leagueWhere = leagueKeys.map(l => `OverviewPage LIKE '${l}%'`).join(' OR ');
-        where = `(${where}) AND (${leagueWhere})`;
+        
+        // 構建聯賽條件，使用更精確的匹配
+        const leagueConditions = Object.keys(this.leagues).map(league => 
+            `OverviewPage = '${league}' OR OverviewPage LIKE '${league}/%'`
+        ).join(' OR ');
+        
+        // 構建完整的查詢條件
+        let where = `DateTime_UTC >= '${startStr}' AND DateTime_UTC <= '${endStr}' AND (${leagueConditions})`;
+        
         if (finishedOnly) {
             where += " AND Team1Score IS NOT NULL AND Team2Score IS NOT NULL";
         }
+
+        console.log('查詢條件:', where);
+
         const response = await axios.get(this.baseUrl, {
             params: {
                 action: 'cargoquery',
@@ -293,16 +302,24 @@ class MatchScraper {
                 order_by: 'DateTime_UTC ASC'
             }
         });
+
         if (response.data && response.data.cargoquery) {
-            // 解析 leagueName 並只回傳主要聯賽
             const matches = response.data.cargoquery.map(match => {
                 const matchData = match.title;
                 const leagueName = matchData.OverviewPage.split('/')[0];
-                if (!leagueKeys.includes(leagueName)) return null;
+                
+                // 檢查是否有 TBD 隊伍
+                if (matchData.Team1.includes('TBD') || matchData.Team2.includes('TBD')) {
+                    console.log(`跳過比賽：${matchData.Team1} vs ${matchData.Team2}（包含 TBD 隊伍）`);
+                    return null;
+                }
+
                 const matchInfo = this.parseLeaguepediaMatch(matchData);
                 matchInfo.league = leagueName;
                 return matchInfo;
             }).filter(Boolean);
+
+            console.log(`找到 ${matches.length} 場符合條件的比賽`);
             return matches;
         }
         return [];
