@@ -86,8 +86,8 @@ class LOLPredictionBot {
                 ]
             },
             {
-                name: 'testpastmatch',
-                description: '顯示過去2天已結束的比賽（測試用）'
+                name: 'help',
+                description: '顯示機器人使用教學'
             }
         ];
 
@@ -139,8 +139,8 @@ class LOLPredictionBot {
             case 'setbroadcastchannel':
                 await this.setBroadcastChannel(interaction);
                 break;
-            case 'testpastmatch':
-                await this.showPastMatches(interaction);
+            case 'help':
+                await this.showHelp(interaction);
                 break;
             default:
                 await interaction.reply({ content: '未知的命令！', ephemeral: true });
@@ -427,6 +427,21 @@ class LOLPredictionBot {
             return interaction.reply({ content: '此比賽已不可預測！', ephemeral: true });
         }
 
+        // 檢查比賽時間是否已過預測時限（比賽開始後半小時）
+        const matchTime = new Date(match.time);
+        const now = new Date();
+        const predictionDeadline = new Date(matchTime.getTime() + 30 * 60 * 1000); // 比賽時間 + 30分鐘
+        
+        if (now > predictionDeadline) {
+            console.log('已超過預測時限:', {
+                matchId,
+                matchTime: matchTime.toISOString(),
+                predictionDeadline: predictionDeadline.toISOString(),
+                now: now.toISOString()
+            });
+            return interaction.reply({ content: '此比賽已超過預測時限（比賽開始後30分鐘）！', ephemeral: true });
+        }
+
         const modal = this.createPredictionModal(matchId, match.format);
         await interaction.showModal(modal);
     }
@@ -485,7 +500,7 @@ class LOLPredictionBot {
             
             await interaction.reply({
                 content: `廣播頻道已設定為 ${channel}！`,
-                ephemeral: true
+                ephemeral: false
             });
         } catch (error) {
             console.error('設定廣播頻道時發生錯誤:', error);
@@ -505,12 +520,19 @@ class LOLPredictionBot {
                 const guildId = guildData.guild_id;
                 const channelId = guildData.broadcast_channel_id;
                 const guild = this.client.guilds.cache.get(guildId);
-                const channel = guild?.channels.cache.get(channelId);
-
-                if (!channel) {
-                    console.log(`[updateUpcomingMatches] 找不到廣播頻道或伺服器: guildId=${guildId}, channelId=${channelId}`);
+                
+                if (!guild) {
+                    console.log(`[updateUpcomingMatches] 找不到伺服器: guildId=${guildId}`);
                     continue;
                 }
+
+                const channel = guild.channels.cache.get(channelId);
+                if (!channel) {
+                    console.log(`[updateUpcomingMatches] 找不到頻道: guildId=${guildId}, channelId=${channelId}`);
+                    continue;
+                }
+
+                console.log(`[updateUpcomingMatches] 正在更新伺服器 ${guildId} 的比賽...`);
 
                 const upcomingMatches = await this.scraper.getTodayAndTomorrowMatches();
                 const broadcastedMatches = await this.db.getBroadcastedMatches(guildId);
@@ -566,8 +588,16 @@ class LOLPredictionBot {
             const predictions = await this.db.getMatchPredictions(match.id);
             // 廣播到綁定頻道
             const guild = this.client.guilds.cache.get(guildId);
+            if (!guild) {
+                try {
+                    guild = await this.client.guilds.fetch(guildId);
+                } catch (error) {
+                    console.warn(`[processMatchResult] 無法 fetch guild: ${guildId}`, error);
+                    return;
+                }
+            }
             const channelId = await this.db.getBroadcastChannel(guildId);
-            const channel = guild?.channels.cache.get(channelId);
+            const channel = await guild.channels.fetch(channelId).catch(() => null);
             if (!channel) {
                 console.log(`[processMatchResult] 找不到廣播頻道: guildId=${guildId}, channelId=${channelId}`);
                 return;
@@ -643,10 +673,14 @@ class LOLPredictionBot {
             const userResults = [];
             
             for (const prediction of predictions) {
+                if (!prediction.user_id) {
+                    console.error(`[processMatchResult] 預測記錄缺少 user_id:`, prediction);
+                    continue;
+                }
                 const status = this.evaluatePrediction(prediction.prediction, result);
-                await this.db.updateUserStats(prediction.userId, guildId, status);
+                await this.db.updateUserStats(prediction.user_id, guildId, status);
                 
-                const user = await this.client.users.fetch(prediction.userId);
+                const user = await this.client.users.fetch(prediction.user_id);
                 userResults.push({
                     user: user.username,
                     prediction: prediction.prediction,
@@ -711,35 +745,36 @@ class LOLPredictionBot {
         await this.updateUpcomingMatches();
     }
 
-    async showPastMatches(interaction) {
-        await interaction.deferReply();
-        // 查詢過去2天已結束比賽
-        const now = new Date();
-        const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
-        const matches = await this.scraper.getMatchesInRange(twoDaysAgo, now, true); // true=已結束
-        // 用 scraper.leagues 的 key 做篩選
-        const leagueKeys = Object.keys(this.scraper.leagues);
-        console.log('[testpastmatch] 查詢到比賽數量:', matches.length);
-        matches.forEach(m => {
-            console.log(`[testpastmatch] ${m.league} | ${m.team1} vs ${m.team2} | ${m.time}`);
-        });
-        const filtered = matches.filter(m => leagueKeys.includes(m.league));
-        console.log('[testpastmatch] 篩選後主要聯賽比賽數量:', filtered.length);
-        if (!filtered || filtered.length === 0) {
-            await interaction.followUp('過去2天沒有主要聯賽的已結束比賽！');
-            return;
-        }
-        for (const match of filtered) {
-            const { embed, files, button } = await this.createMatchMessage(match);
-            await interaction.followUp({ embeds: [embed], components: [button], files });
-            // 將比賽資料存入 broadcasted_matches 表
-            try {
-                await this.db.addBroadcastedMatch(interaction.guild.id, match.id, match);
-                console.log(`[testpastmatch] 已將比賽 ${match.id} 加入廣播列表`);
-            } catch (error) {
-                console.error(`[testpastmatch] 加入比賽 ${match.id} 到廣播列表時發生錯誤:`, error);
-            }
-        }
+    async showHelp(interaction) {
+        const embed = new EmbedBuilder()
+            .setColor(0x0099FF)
+            .setTitle('LOL Esports Prediction Bot 使用教學')
+            .setDescription('這是一個英雄聯盟電競比賽預測機器人，可以預測比賽結果並追蹤預測準確度。')
+            .addFields(
+                { 
+                    name: '查看比賽',
+                    value: '使用 `/matches` 查看今天和明天的比賽。\n點擊「🎯 進行預測」按鈕來預測比賽結果。',
+                    inline: false 
+                },
+                { 
+                    name: '預測規則',
+                    value: '預測格式為 `num:num`，例如：\n- BO1：`1:0`\n- BO3：`2:0`、`2:1`\n- BO5：`3:0`、`3:1`、`3:2`',
+                    inline: false 
+                },
+                { 
+                    name: '查看統計',
+                    value: '使用 `/stats` 查看你的預測統計。\n使用 `/leaderboard` 查看伺服器預測排行榜。\n使用 `/mypredictions` 查看你所有預測過的比賽。',
+                    inline: false 
+                },
+                { 
+                    name: '綁定廣播頻道',
+                    value: '使用 `/setbroadcastchannel` 設定比賽結果廣播頻道。',
+                    inline: false 
+                }
+            )
+            .setFooter({ text: 'LOL Esports Prediction Bot' });
+
+        await interaction.reply({ embeds: [embed] });
     }
 }
 

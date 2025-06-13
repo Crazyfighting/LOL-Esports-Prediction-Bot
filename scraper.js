@@ -310,32 +310,50 @@ class MatchScraper {
 
     async checkMatchResult(matchId) {
         try {
+            console.log(`[checkMatchResult] 正在檢查比賽結果，MatchId: ${matchId}`);
             const response = await axios.get(this.baseUrl, {
                 params: {
                     action: 'cargoquery',
                     format: 'json',
                     tables: 'MatchSchedule',
-                    fields: 'Team1,Team2,Team1Score,Team2Score,DateTime_UTC',
+                    fields: 'MatchId,Team1,Team2,Team1Score,Team2Score,DateTime_UTC',
                     where: `MatchId = "${matchId}"`
                 }
             });
 
+            console.log(`[checkMatchResult] API 回應:`, JSON.stringify(response.data, null, 2));
+
             if (response.data && response.data.cargoquery && response.data.cargoquery.length > 0) {
                 const match = response.data.cargoquery[0].title;
+                console.log(`[checkMatchResult] 找到比賽資料:`, match);
+                
+                // 檢查是否有比分
                 if (match.Team1Score !== null && match.Team2Score !== null) {
-                    return {
+                    const result = {
                         isFinished: true,
                         result: {
-                            winner: parseInt(match.Team1Score) > parseInt(match.Team2Score) ? match.Team1 : match.Team2,
+                            winner: match.Team1Score > match.Team2Score ? match.Team1 : match.Team2,
                             score: `${match.Team1Score}:${match.Team2Score}`
                         }
                     };
+                    console.log(`[checkMatchResult] 比賽已結束，結果:`, result);
+                    return result;
+                } else {
+                    console.log(`[checkMatchResult] 比賽尚未有比分:`, {
+                        matchId: match.MatchId,
+                        team1: match.Team1,
+                        team2: match.Team2,
+                        score1: match.Team1Score,
+                        score2: match.Team2Score,
+                        time: match.DateTime_UTC
+                    });
                 }
             }
             
+            console.log(`[checkMatchResult] 比賽未結束或找不到資料`);
             return { isFinished: false };
         } catch (error) {
-            console.error(`檢查比賽結果時發生錯誤 (${matchId}):`, error);
+            console.error(`[checkMatchResult] 檢查比賽結果時發生錯誤 (${matchId}):`, error);
             return { isFinished: false };
         }
     }
