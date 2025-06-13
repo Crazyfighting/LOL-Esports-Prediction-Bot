@@ -270,7 +270,7 @@ class LOLPredictionBot {
         const embed = new EmbedBuilder()
             .setColor(0xFFD700)
             .setTitle(`${interaction.guild.name} 預測排行榜`)
-            .setDescription('前10名預測高手');
+            .setDescription('前10明燈');
 
         for (let i = 0; i < Math.min(10, leaderboard.length); i++) {
             const user = leaderboard[i];
@@ -775,6 +775,42 @@ class LOLPredictionBot {
             .setFooter({ text: 'LOL Esports Prediction Bot' });
 
         await interaction.reply({ embeds: [embed] });
+    }
+
+    async showPastMatches(interaction) {
+        try {
+            if (!interaction.memberPermissions.has('ADMINISTRATOR')) {
+                return interaction.reply({ content: '你沒有足夠的權限執行此命令！', ephemeral: true });
+            }
+
+            await interaction.deferReply();
+
+            const days = interaction.options.getInteger('days');
+            const endDate = new Date();
+            const startDate = new Date(endDate.getTime() - (days * 24 * 60 * 60 * 1000));
+
+            console.log('獲取過去比賽:', {
+                startDate: startDate.toISOString(),
+                endDate: endDate.toISOString(),
+                days
+            });
+
+            const matches = await this.scraper.getMatchesInRange(startDate, endDate, true);
+            console.log(`找到 ${matches.length} 場過去比賽`);
+
+            if (matches.length === 0) {
+                return interaction.followUp('在指定時間範圍內沒有找到任何比賽！');
+            }
+
+            for (const match of matches) {
+                const { embed, files, button } = await this.createMatchMessage(match);
+                await interaction.followUp({ embeds: [embed], components: [button], files });
+                await this.db.addBroadcastedMatch(interaction.guild.id, match.id, match);
+            }
+        } catch (error) {
+            console.error('獲取過去比賽時發生錯誤:', error);
+            await interaction.reply('獲取過去比賽時發生錯誤，請稍後再試！');
+        }
     }
 }
 

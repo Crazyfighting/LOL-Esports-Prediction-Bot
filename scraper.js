@@ -114,13 +114,24 @@ class MatchScraper {
             
             try {
                 console.log('正在獲取未來24小時的比賽資料...');
+                
+                // 構建聯賽條件，使用更精確的匹配
+                const leagueConditions = Object.keys(this.leagues).map(league => 
+                    `OverviewPage = '${league}' OR OverviewPage LIKE '${league}/%'`
+                ).join(' OR ');
+                
+                // 構建完整的查詢條件
+                const where = `DateTime_UTC >= NOW() AND DateTime_UTC <= DATE_ADD(NOW(), INTERVAL 48 HOUR) AND (${leagueConditions})`;
+
+                console.log('查詢條件:', where);
+
                 const response = await axios.get(this.baseUrl, {
                     params: {
                         action: 'cargoquery',
                         format: 'json',
                         tables: 'MatchSchedule',
                         fields: 'Team1,Team2,DateTime_UTC,BestOf,Team1Score,Team2Score,MatchId,OverviewPage',
-                        where: 'DateTime_UTC >= NOW() AND DateTime_UTC <= DATE_ADD(NOW(), INTERVAL 48 HOUR)',
+                        where,
                         order_by: 'DateTime_UTC ASC'
                     }
                 });
@@ -141,7 +152,6 @@ class MatchScraper {
                         console.log(`- ${league}`);
                     });
 
-
                     for (const match of matches) {
                         const matchData = match.title;
                         const leagueName = matchData.OverviewPage.split('/')[0];
@@ -152,12 +162,9 @@ class MatchScraper {
                             continue;
                         }
                         
-                        // 只處理我們關注的聯賽
-                        if (this.leagues[leagueName]) {
-                            const matchInfo = this.parseLeaguepediaMatch(matchData);
-                            matchInfo.league = leagueName;
-                            allMatches.push(matchInfo);
-                        }
+                        const matchInfo = this.parseLeaguepediaMatch(matchData);
+                        matchInfo.league = leagueName;
+                        allMatches.push(matchInfo);
                     }
                 } else {
                     console.log('目前沒有比賽資料');
@@ -333,7 +340,7 @@ class MatchScraper {
                     action: 'cargoquery',
                     format: 'json',
                     tables: 'MatchSchedule',
-                    fields: 'MatchId,Team1,Team2,Team1Score,Team2Score,DateTime_UTC',
+                    fields: 'MatchId,Team1,Team2,Team1Score,Team2Score,DateTime_UTC,BestOf',
                     where: `MatchId = "${matchId}"`
                 }
             });
@@ -346,11 +353,47 @@ class MatchScraper {
                 
                 // 檢查是否有比分
                 if (match.Team1Score !== null && match.Team2Score !== null) {
+                    const team1Score = parseInt(match.Team1Score);
+                    const team2Score = parseInt(match.Team2Score);
+                    const bestOf = parseInt(match.BestOf);
+
+                    // 檢查比分是否符合賽制要求
+                    let isValidScore = false;
+                    switch (bestOf) {
+                        case 1: // BO1
+                            isValidScore = (team1Score === 1 || team2Score === 1) && 
+                                         (team1Score + team2Score === 1);
+                            break;
+                        case 3: // BO3
+                            isValidScore = (team1Score === 2 || team2Score === 2) && 
+                                         (team1Score + team2Score <= 3);
+                            break;
+                        case 5: // BO5
+                            isValidScore = (team1Score === 3 || team2Score === 3) && 
+                                         (team1Score + team2Score <= 5);
+                            break;
+                        default:
+                            console.log(`[checkMatchResult] 未知的賽制: ${bestOf}`);
+                            return { isFinished: false };
+                    }
+
+                    if (!isValidScore) {
+                        console.log(`[checkMatchResult] 比分不符合賽制要求:`, {
+                            matchId: match.MatchId,
+                            team1: match.Team1,
+                            team2: match.Team2,
+                            score1: team1Score,
+                            score2: team2Score,
+                            bestOf
+                        });
+                        return { isFinished: false };
+                    }
+
                     const result = {
                         isFinished: true,
                         result: {
-                            winner: match.Team1Score > match.Team2Score ? match.Team1 : match.Team2,
-                            score: `${match.Team1Score}:${match.Team2Score}`
+                            winner: team1Score > team2Score ? match.Team1 : match.Team2,
+                            score: `${team1Score}:${team2Score}`
                         }
                     };
                     console.log(`[checkMatchResult] 比賽已結束，結果:`, result);
