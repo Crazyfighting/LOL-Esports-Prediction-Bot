@@ -1,6 +1,8 @@
 const { Client, GatewayIntentBits, Collection, EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder, AttachmentBuilder } = require('discord.js');
 const { createCanvas, loadImage } = require('canvas');
-const { token } = require('./config.json');
+// 從環境變數讀取 token 和 clientId
+const token = process.env.DISCORD_TOKEN;
+const clientId = process.env.DISCORD_CLIENT_ID;
 const Database = require('./database.js');
 const MatchScraper = require('./scraper.js');
 const cron = require('node-cron');
@@ -57,7 +59,6 @@ class LOLPredictionBot {
 
     async registerCommands() {
         const { REST, Routes } = require('discord.js');
-        const { clientId } = require('./config.json');
         
         const commands = [
             {
