@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: lol-prediction-bot
+    env: node
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: lol-prediction-db
+          property: connectionString
+    healthCheckPath: /health
+    autoDeploy: true
+
+databases:
+  - name: lol-prediction-db
+    databaseName: predictions
+    user: predictions_user
+    plan: free 

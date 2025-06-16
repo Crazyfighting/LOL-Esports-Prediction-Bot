@@ -5,6 +5,9 @@ const Database = require('./database.js');
 const MatchScraper = require('./scraper.js');
 const cron = require('node-cron');
 const path = require('path');
+const express = require('express');
+const app = express();
+const port = process.env.PORT || 3000;
 
 class LOLPredictionBot {
     constructor() {
@@ -839,3 +842,13 @@ class LOLPredictionBot {
 // 啟動機器人
 const bot = new LOLPredictionBot();
 bot.start();
+
+// 添加健康檢查端點
+app.get('/health', (req, res) => {
+    res.status(200).send('OK');
+});
+
+// 啟動 Express 伺服器
+app.listen(port, () => {
+    console.log(`健康檢查伺服器運行在 port ${port}`);
+});
